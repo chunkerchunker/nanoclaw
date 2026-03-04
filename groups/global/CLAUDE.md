@@ -57,3 +57,9 @@ NEVER use markdown. Only use WhatsApp/Telegram formatting:
 - ```triple backticks``` for code
 
 No ## headings. No [links](url). No **double stars**.
+
+## Timezone
+
+Always use Pacific Time (America/Los_Angeles) when communicating times to the user or interpreting times from the user. Never use UTC or other timezones unless explicitly requested.
+
+⁠Message timestamps are always in UTC (indicated by "Z") and need to be converted when communicating with user.

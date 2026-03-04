@@ -393,19 +393,26 @@ function formatDuration(ms: number): string {
 
 function formatRelativeTime(iso: string | undefined): string {
   if (!iso) return '--';
-  const diff = Date.now() - new Date(iso).getTime();
+  const date = new Date(iso);
+  const localTime = date.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'America/Los_Angeles',
+  });
+  const diff = Date.now() - date.getTime();
   if (diff < 0) {
     // Future time
     const absDiff = Math.abs(diff);
-    if (absDiff < 60000) return 'in <1m';
-    if (absDiff < 3600000) return `in ${Math.floor(absDiff / 60000)}m`;
-    if (absDiff < 86400000) return `in ${Math.floor(absDiff / 3600000)}h`;
-    return `in ${Math.floor(absDiff / 86400000)}d`;
+    if (absDiff < 60000) return `${localTime} (in <1m)`;
+    if (absDiff < 3600000) return `${localTime} (in ${Math.floor(absDiff / 60000)}m)`;
+    if (absDiff < 86400000) return `${localTime} (in ${Math.floor(absDiff / 3600000)}h)`;
+    return `${localTime} (in ${Math.floor(absDiff / 86400000)}d)`;
   }
-  if (diff < 60000) return '<1m ago';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-  return `${Math.floor(diff / 86400000)}d ago`;
+  if (diff < 60000) return `${localTime} (<1m ago)`;
+  if (diff < 3600000) return `${localTime} (${Math.floor(diff / 60000)}m ago)`;
+  if (diff < 86400000) return `${localTime} (${Math.floor(diff / 3600000)}h ago)`;
+  return `${localTime} (${Math.floor(diff / 86400000)}d ago)`;
 }
 
 function levelColor(level: string): string {
