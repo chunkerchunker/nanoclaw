@@ -312,11 +312,14 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
+  // Exclude sender='system' messages — those are internal (e.g. clear_session
+  // resume prompts) and handled by the drain path, not the message loop.
   const sql = `
     SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders})
       AND is_bot_message = 0 AND content NOT LIKE ?
+      AND sender != 'system'
       AND content != '' AND content IS NOT NULL
     ORDER BY timestamp
   `;
@@ -514,6 +517,10 @@ export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
   ).run(groupFolder, sessionId);
+}
+
+export function deleteSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
 export function getAllSessions(): Record<string, string> {

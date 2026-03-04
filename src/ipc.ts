@@ -22,6 +22,7 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  clearSession: (targetFolder: string, prompt?: string) => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -73,23 +74,43 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  await deps.sendMessage(data.chatJid, data.text);
-                  logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'IPC message sent',
+              if (data.type === 'message') {
+                if (!data.chatJid || !data.text) {
+                  logger.warn(
+                    {
+                      sourceGroup,
+                      hasJid: !!data.chatJid,
+                      hasText: !!data.text,
+                      file,
+                    },
+                    'IPC message dropped: missing chatJid or text',
                   );
                 } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
-                  );
+                  // Authorization: verify this group can send to this chatJid
+                  const targetGroup = registeredGroups[data.chatJid];
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    await deps.sendMessage(data.chatJid, data.text);
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        length: data.text.length,
+                      },
+                      'IPC message sent',
+                    );
+                  } else {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        targetFolder: targetGroup?.folder,
+                      },
+                      'Unauthorized IPC message attempt blocked',
+                    );
+                  }
                 }
               }
               fs.unlinkSync(filePath);
@@ -171,6 +192,8 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For clear_session
+    targetFolder?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -382,6 +405,26 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'clear_session': {
+      const targetFolder = isMain
+        ? data.targetFolder || sourceGroup
+        : sourceGroup;
+      if (!isMain && data.targetFolder && data.targetFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, targetFolder: data.targetFolder },
+          'Unauthorized clear_session attempt blocked',
+        );
+        break;
+      }
+      if (!isValidGroupFolder(targetFolder)) {
+        logger.warn({ targetFolder }, 'Invalid clear_session target folder');
+        break;
+      }
+      await deps.clearSession(targetFolder, data.prompt);
+      logger.info({ sourceGroup, targetFolder }, 'Session cleared via IPC');
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

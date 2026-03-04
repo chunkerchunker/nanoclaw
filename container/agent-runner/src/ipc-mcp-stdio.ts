@@ -280,6 +280,61 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'clear_session',
+  `Clear the conversation session for a group, forcing it to start fresh on the next message. Useful when a group's agent is stuck, confused, or needs a clean slate.
+
+From main: can clear any group's session by specifying target_group_folder.
+From other groups: can only clear own session.`,
+  {
+    target_group_folder: z
+      .string()
+      .optional()
+      .describe(
+        '(Main group only) Folder name of the target group whose session to clear. Defaults to own group.',
+      ),
+    prompt: z
+      .string()
+      .optional()
+      .describe(
+        'Optional message to send to the group after clearing, so the fresh agent processes it as its first instruction.',
+      ),
+  },
+  async (args) => {
+    const targetFolder =
+      isMain && args.target_group_folder
+        ? args.target_group_folder
+        : groupFolder;
+
+    if (!isMain && args.target_group_folder && args.target_group_folder !== groupFolder) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: "Only the main group can clear other groups' sessions.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'clear_session',
+      targetFolder,
+      groupFolder,
+      prompt: args.prompt,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const msg = args.prompt
+      ? `Session clear requested for "${targetFolder}" with follow-up prompt.`
+      : `Session clear requested for "${targetFolder}".`;
+    return { content: [{ type: 'text' as const, text: msg }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

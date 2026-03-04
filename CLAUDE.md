@@ -62,3 +62,13 @@ systemctl --user restart nanoclaw
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+
+## Stale Agent-Runner Copies
+
+Session directories (`data/sessions/*/agent-runner-src/`) may contain old copies of the agent-runner source. The container compiles these at startup instead of its built-in source. After modifying `container/agent-runner/src/`, flush them:
+
+```bash
+rm -r data/sessions/*/agent-runner-src 2>/dev/null || true
+```
+
+Then rebuild the container and restart NanoClaw.

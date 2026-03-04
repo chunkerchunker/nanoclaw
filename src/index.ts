@@ -3,6 +3,7 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
@@ -23,6 +24,7 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
+  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -164,8 +166,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+        m.sender === 'system' ||
+        (TRIGGER_PATTERN.test(m.content.trim()) &&
+          (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg))),
     );
     if (!hasTrigger) return true;
   }
@@ -211,10 +214,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      logger.info(
+        { group: group.name, length: raw.length, deliverable: !!text },
+        `Agent output: ${raw.slice(0, 200)}`,
+      );
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
+        logger.debug(
+          { group: group.name, length: text.length },
+          'Agent output delivered',
+        );
+      } else {
+        logger.info(
+          { group: group.name },
+          'Agent output empty after stripping <internal>, not delivered',
+        );
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -392,9 +407,10 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                TRIGGER_PATTERN.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+                m.sender === 'system' ||
+                (TRIGGER_PATTERN.test(m.content.trim()) &&
+                  (m.is_from_me ||
+                    isTriggerAllowed(chatJid, m.sender, allowlistCfg))),
             );
             if (!hasTrigger) continue;
           }
@@ -563,6 +579,52 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    clearSession: async (targetFolder, prompt) => {
+      // 1. Delete session from SQLite
+      deleteSession(targetFolder);
+      // 2. Remove in-memory session ID
+      delete sessions[targetFolder];
+      // 3. Delete conversation state on disk
+      const projectsDir = path.join(
+        DATA_DIR,
+        'sessions',
+        targetFolder,
+        '.claude',
+        'projects',
+      );
+      fs.rmSync(projectsDir, { recursive: true, force: true });
+      // 4. Close active container (forces restart on next message)
+      const targetJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === targetFolder,
+      )?.[0];
+      if (targetJid) {
+        queue.closeStdin(targetJid);
+        // 5. If prompt provided, store as a user message and trigger processing
+        if (prompt) {
+          const resumeTs = new Date().toISOString();
+          storeMessage({
+            id: `clear-${Date.now()}`,
+            chat_jid: targetJid,
+            sender: 'system',
+            sender_name: 'System',
+            content: prompt,
+            timestamp: resumeTs,
+            is_from_me: false,
+            is_bot_message: false,
+          });
+          // Rewind cursor to just before the resume prompt. The message loop
+          // may have piped the prompt to the dying container and advanced
+          // lastAgentTimestamp past it, so the drain run's processGroupMessages
+          // would find nothing. Rewinding guarantees it picks up the prompt.
+          lastAgentTimestamp[targetJid] = new Date(
+            new Date(resumeTs).getTime() - 1,
+          ).toISOString();
+          saveState();
+          queue.enqueueMessageCheck(targetJid);
+        }
+      }
+      logger.info({ targetFolder }, 'Session cleared');
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

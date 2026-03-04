@@ -238,6 +238,18 @@ You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts
 
 ---
 
+## Clearing Sessions
+
+Use the `clear_session` MCP tool to reset a group's conversation context. The agent in that group will start fresh on the next message.
+
+- `clear_session(target_group_folder: "whatsapp_datestamp")` — clears the datestamp group's session
+- `clear_session(target_group_folder: "whatsapp_datestamp", prompt: "Start fresh and introduce yourself")` — clears and sends a message to kick off the new session
+- `clear_session()` — clears your own (main) session
+
+As the main group, you can clear any group's session. Non-main groups can only clear their own.
+
+---
+
 ## Scheduling for Other Groups
 
 When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:
