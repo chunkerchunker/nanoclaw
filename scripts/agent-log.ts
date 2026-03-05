@@ -1,11 +1,13 @@
 /**
  * View agent interaction transcript for a group.
- * Usage: npx tsx scripts/agent-log.ts <group-folder> [--tail N] [--follow]
+ * Usage: npx tsx scripts/agent-log.ts <group-folder> [--tail N] [--follow] [--history [session-id]]
  *
  * Examples:
  *   npx tsx scripts/agent-log.ts whatsapp_main
  *   npx tsx scripts/agent-log.ts whatsapp_datestamp --tail 20
  *   npx tsx scripts/agent-log.ts whatsapp_main --follow
+ *   npx tsx scripts/agent-log.ts whatsapp_main --history          # list all past sessions
+ *   npx tsx scripts/agent-log.ts whatsapp_main --history abc123   # view specific archived session
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
@@ -48,17 +50,21 @@ if (!folder) {
   } catch {
     console.error('Could not read database.');
   }
-  console.log(`\nUsage: npx tsx scripts/agent-log.ts <group-folder> [--tail N] [--follow] [--messages]`);
+  console.log(`\nUsage: npx tsx scripts/agent-log.ts <group-folder> [--tail N] [--follow] [--messages] [--history [session-id]]`);
   process.exit(1);
 }
 
 const follow = flags.has('--follow') || flags.has('-f');
 const messagesMode = flags.has('--messages') || flags.has('-m');
+const historyMode = flags.has('--history') || flags.has('-h');
 let tailCount = 50; // default
 const tailIdx = args.indexOf('--tail');
 if (tailIdx >= 0 && args[tailIdx + 1]) {
   tailCount = parseInt(args[tailIdx + 1], 10) || 50;
 }
+// --history <session-id> to view a specific archived session
+const historyIdx = args.indexOf('--history');
+const historySessionId = historyIdx >= 0 ? args[historyIdx + 1] : undefined;
 
 // ─── Session lookup ──────────────────────────────────────────────────────────
 
@@ -76,9 +82,18 @@ function getSessionId(): string | null {
 }
 
 function getJsonlPath(sessionId: string): string {
-  return path.join(
+  // Check active session dir first, then archived logs
+  const activePath = path.join(
     SESSIONS_DIR, folder, '.claude', 'projects', '-workspace-group', `${sessionId}.jsonl`,
   );
+  if (fs.existsSync(activePath)) return activePath;
+  const archivePath = path.join(SESSIONS_DIR, folder, 'log-archive', `${sessionId}.jsonl`);
+  if (fs.existsSync(archivePath)) return archivePath;
+  return activePath; // fallback to active path for error messages
+}
+
+function getArchiveDir(): string {
+  return path.join(SESSIONS_DIR, folder, 'log-archive');
 }
 
 // ─── Transcript parsing ─────────────────────────────────────────────────────
@@ -287,6 +302,67 @@ function printMessages(): void {
   }
 }
 
+// ─── History ────────────────────────────────────────────────────────────────
+
+function printHistory(): void {
+  const archiveDir = getArchiveDir();
+  const activeDir = path.join(SESSIONS_DIR, folder, '.claude', 'projects', '-workspace-group');
+
+  // Collect all JSONL files from both active and archive dirs
+  const sessions: { id: string; mtime: Date; source: string }[] = [];
+
+  for (const [dir, source] of [[activeDir, 'active'], [archiveDir, 'archived']] as const) {
+    if (!fs.existsSync(dir)) continue;
+    for (const file of fs.readdirSync(dir)) {
+      if (!file.endsWith('.jsonl')) continue;
+      const id = file.replace('.jsonl', '');
+      const stat = fs.statSync(path.join(dir, file));
+      sessions.push({ id, mtime: stat.mtime, source });
+    }
+  }
+
+  // Deduplicate (active wins over archived)
+  const seen = new Set<string>();
+  const unique = sessions.filter((s) => {
+    if (seen.has(s.id)) return false;
+    seen.add(s.id);
+    return true;
+  });
+
+  unique.sort((a, b) => a.mtime.getTime() - b.mtime.getTime());
+
+  if (unique.length === 0) {
+    console.error(`${FG_RED}No session logs found for '${folder}'.${RESET}`);
+    process.exit(1);
+  }
+
+  // If a specific session ID was provided, show it
+  if (historySessionId) {
+    const jsonlPath = getJsonlPath(historySessionId);
+    if (!fs.existsSync(jsonlPath)) {
+      console.error(`${FG_RED}Session '${historySessionId}' not found.${RESET}`);
+      process.exit(1);
+    }
+    console.log(`${BOLD}Agent log: ${folder}${RESET} ${FG_GRAY}(session: ${historySessionId.slice(0, 8)}…)${RESET}`);
+    console.log(`${FG_GRAY}${'─'.repeat(60)}${RESET}`);
+    const turns = parseJsonl(jsonlPath, tailCount);
+    for (const turn of turns) printTurn(turn);
+    return;
+  }
+
+  // Otherwise list all sessions
+  const currentSessionId = getSessionId();
+  console.log(`${BOLD}Session history: ${folder}${RESET} ${FG_GRAY}(${unique.length} sessions)${RESET}`);
+  console.log(`${FG_GRAY}${'─'.repeat(60)}${RESET}`);
+  for (const s of unique) {
+    const isCurrent = s.id === currentSessionId;
+    const tag = isCurrent ? ` ${FG_MAGENTA}(current)${RESET}` : ` ${FG_GRAY}(${s.source})${RESET}`;
+    const date = s.mtime.toLocaleString();
+    console.log(`  ${FG_CYAN}${s.id.slice(0, 8)}…${RESET} ${FG_GRAY}${date}${RESET}${tag}`);
+  }
+  console.log(`\nView a session: npx tsx scripts/agent-log.ts ${folder} --history <session-id>`);
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function main(): void {
@@ -295,9 +371,14 @@ function main(): void {
     return;
   }
 
+  if (historyMode) {
+    printHistory();
+    return;
+  }
+
   const sessionId = getSessionId();
   if (!sessionId) {
-    console.error(`${FG_RED}No active session for '${folder}'. Use --messages to view DB message history.${RESET}`);
+    console.error(`${FG_RED}No active session for '${folder}'. Use --messages to view DB message history, or --history to browse past sessions.${RESET}`);
     process.exit(1);
   }
 

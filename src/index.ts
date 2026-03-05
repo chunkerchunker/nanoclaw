@@ -584,7 +584,7 @@ async function main(): Promise<void> {
       deleteSession(targetFolder);
       // 2. Remove in-memory session ID
       delete sessions[targetFolder];
-      // 3. Delete conversation state on disk
+      // 3. Archive JSONL session logs, then delete conversation state on disk
       const projectsDir = path.join(
         DATA_DIR,
         'sessions',
@@ -592,6 +592,27 @@ async function main(): Promise<void> {
         '.claude',
         'projects',
       );
+      const jsonlDir = path.join(projectsDir, '-workspace-group');
+      const archiveDir = path.join(
+        DATA_DIR,
+        'sessions',
+        targetFolder,
+        'log-archive',
+      );
+      if (fs.existsSync(jsonlDir)) {
+        const jsonlFiles = fs.readdirSync(jsonlDir).filter((f) => f.endsWith('.jsonl'));
+        if (jsonlFiles.length > 0) {
+          fs.mkdirSync(archiveDir, { recursive: true });
+          for (const file of jsonlFiles) {
+            const src = path.join(jsonlDir, file);
+            const dest = path.join(archiveDir, file);
+            // Don't overwrite if already archived (e.g. from a previous clear)
+            if (!fs.existsSync(dest)) {
+              fs.copyFileSync(src, dest);
+            }
+          }
+        }
+      }
       fs.rmSync(projectsDir, { recursive: true, force: true });
       // 4. Close active container (forces restart on next message)
       const targetJid = Object.entries(registeredGroups).find(
