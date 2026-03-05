@@ -76,6 +76,31 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+
+  // Prune sessions whose conversation state no longer exists on disk.
+  // This prevents the agent from repeatedly failing to --resume a deleted session.
+  const prunedFolders: string[] = [];
+  for (const [folder, sessionId] of Object.entries(sessions)) {
+    const projectsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      folder,
+      '.claude',
+      'projects',
+    );
+    if (!fs.existsSync(projectsDir)) {
+      deleteSession(folder);
+      delete sessions[folder];
+      prunedFolders.push(folder);
+    }
+  }
+  if (prunedFolders.length > 0) {
+    logger.info(
+      { pruned: prunedFolders },
+      'Pruned stale sessions (missing projects directory)',
+    );
+  }
+
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
