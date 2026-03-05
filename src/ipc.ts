@@ -1,5 +1,7 @@
-import fs from 'fs';
-import path from 'path';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { CronExpressionParser } from 'cron-parser';
 
@@ -13,7 +15,7 @@ import {
   getTaskById,
   updateTask,
 } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -30,6 +32,44 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   clearSession: (targetFolder: string, prompt?: string) => Promise<void>;
+}
+
+const execFileAsync = promisify(execFile);
+
+async function fetchClaudeUsage(): Promise<unknown> {
+  // Extract OAuth token from macOS Keychain
+  const { stdout: tokenJson } = await execFileAsync('security', [
+    'find-generic-password',
+    '-s',
+    'Claude Code-credentials',
+    '-w',
+  ]);
+
+  // Parse access token from the stored JSON
+  let accessToken: string;
+  try {
+    const creds = JSON.parse(tokenJson.trim());
+    accessToken = creds?.claudeAiOauth?.accessToken;
+    if (!accessToken) throw new Error('accessToken not found in credentials');
+  } catch {
+    // Fall back to raw token if not JSON
+    accessToken = tokenJson.trim();
+  }
+
+  const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'anthropic-beta': 'oauth-2025-04-20',
+      'User-Agent': 'claude-code/2.1.69',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Usage API returned ${res.status}: ${await res.text()}`);
+  }
+
+  return res.json();
 }
 
 let ipcWatcherRunning = false;
@@ -228,6 +268,8 @@ export async function processTaskIpc(
     containerConfig?: RegisteredGroup['containerConfig'];
     // For clear_session
     targetFolder?: string;
+    // For get_usage
+    requestId?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -461,6 +503,26 @@ export async function processTaskIpc(
       }
       await deps.clearSession(targetFolder, data.prompt);
       logger.info({ sourceGroup, targetFolder }, 'Session cleared via IPC');
+      break;
+    }
+
+    case 'get_usage': {
+      const requestId = data.requestId;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'get_usage missing requestId');
+        break;
+      }
+      const groupIpcDir = resolveGroupIpcPath(sourceGroup);
+      const responsePath = path.join(groupIpcDir, `response-${requestId}.json`);
+      try {
+        const usageData = await fetchClaudeUsage();
+        fs.writeFileSync(responsePath, JSON.stringify({ data: usageData }, null, 2));
+        logger.info({ sourceGroup, requestId }, 'Usage data written');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        fs.writeFileSync(responsePath, JSON.stringify({ error: msg }));
+        logger.error({ sourceGroup, requestId, err }, 'Failed to fetch usage');
+      }
       break;
     }
 

@@ -335,6 +335,44 @@ From other groups: can only clear own session.`,
   },
 );
 
+server.tool(
+  'claude_usage',
+  'Check Claude Code plan usage (Pro/Max subscription quota). Returns current utilization percentages for 5-hour and 7-day windows.',
+  {},
+  async () => {
+    const requestId = `usage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const data = {
+      type: 'get_usage',
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Poll for response file
+    const responsePath = path.join(IPC_DIR, `response-${requestId}.json`);
+    const timeout = 15_000;
+    const interval = 250;
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      if (fs.existsSync(responsePath)) {
+        const result = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+        fs.unlinkSync(responsePath);
+        if (result.error) {
+          return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result.data, null, 2) }] };
+      }
+      await new Promise((r) => setTimeout(r, interval));
+    }
+
+    return { content: [{ type: 'text' as const, text: 'Timed out waiting for usage data from host.' }], isError: true };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
