@@ -18,3 +18,6 @@
 
 @groups *args:
   npx tsx scripts/groups.ts {{args}}
+
+@mounts *args:
+  npx tsx scripts/mounts.ts {{args}}
