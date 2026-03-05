@@ -516,7 +516,10 @@ export async function processTaskIpc(
       const responsePath = path.join(groupIpcDir, `response-${requestId}.json`);
       try {
         const usageData = await fetchClaudeUsage();
-        fs.writeFileSync(responsePath, JSON.stringify({ data: usageData }, null, 2));
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({ data: usageData }, null, 2),
+        );
         logger.info({ sourceGroup, requestId }, 'Usage data written');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
