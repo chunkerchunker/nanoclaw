@@ -544,6 +544,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Initialize Telegram bot pool for agent swarm (if configured)
+  const { TELEGRAM_BOT_POOL } = await import('./config.js');
+  if (TELEGRAM_BOT_POOL.length > 0) {
+    const { initBotPool } = await import('./channels/telegram.js');
+    await initBotPool(TELEGRAM_BOT_POOL);
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -600,7 +607,9 @@ async function main(): Promise<void> {
         'log-archive',
       );
       if (fs.existsSync(jsonlDir)) {
-        const jsonlFiles = fs.readdirSync(jsonlDir).filter((f) => f.endsWith('.jsonl'));
+        const jsonlFiles = fs
+          .readdirSync(jsonlDir)
+          .filter((f) => f.endsWith('.jsonl'));
         if (jsonlFiles.length > 0) {
           fs.mkdirSync(archiveDir, { recursive: true });
           for (const file of jsonlFiles) {
