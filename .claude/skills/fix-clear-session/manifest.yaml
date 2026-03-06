@@ -1,0 +1,14 @@
+skill: fix-clear-session
+version: 1.0.0
+description: "Add clear_session IPC tool with race condition fixes for reliable session reset and resume"
+core_version: 0.1.0
+adds: []
+modifies:
+  - src/db.ts
+  - src/index.ts
+  - src/ipc.ts
+  - container/agent-runner/src/ipc-mcp-stdio.ts
+structured: {}
+conflicts: []
+depends: []
+test: "npm run build"
