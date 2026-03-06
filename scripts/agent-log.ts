@@ -60,7 +60,8 @@ const historyMode = flags.has('--history') || flags.has('-h');
 let tailCount = 50; // default
 const tailIdx = args.indexOf('--tail');
 if (tailIdx >= 0 && args[tailIdx + 1]) {
-  tailCount = parseInt(args[tailIdx + 1], 10) || 50;
+  const parsed = parseInt(args[tailIdx + 1], 10);
+  tailCount = Number.isNaN(parsed) ? 50 : parsed;
 }
 // --history <session-id> to view a specific archived session
 const historyIdx = args.indexOf('--history');
@@ -358,7 +359,7 @@ function printHistory(): void {
     const isCurrent = s.id === currentSessionId;
     const tag = isCurrent ? ` ${FG_MAGENTA}(current)${RESET}` : ` ${FG_GRAY}(${s.source})${RESET}`;
     const date = s.mtime.toLocaleString();
-    console.log(`  ${FG_CYAN}${s.id.slice(0, 8)}…${RESET} ${FG_GRAY}${date}${RESET}${tag}`);
+    console.log(`  ${FG_CYAN}${s.id}${RESET} ${FG_GRAY}${date}${RESET}${tag}`);
   }
   console.log(`\nView a session: npx tsx scripts/agent-log.ts ${folder} --history <session-id>`);
 }
