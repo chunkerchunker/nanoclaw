@@ -302,7 +302,27 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Prune stale session (projects dir deleted but DB/memory still reference it)
+  if (sessionId) {
+    const projectsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      'projects',
+    );
+    if (!fs.existsSync(projectsDir)) {
+      deleteSession(group.folder);
+      delete sessions[group.folder];
+      sessionId = undefined;
+      logger.info(
+        { group: group.name, folder: group.folder },
+        'Pruned stale session at container start',
+      );
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -474,6 +494,11 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
+
+    // Safety net: recover unprocessed messages (including system resume prompts
+    // from clear_session) that the drain path may have missed due to races.
+    recoverPendingMessages();
+
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }
 }
