@@ -3,10 +3,8 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
-  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
-  TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
 import './channels/index.js';
@@ -25,14 +23,12 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
-  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -53,6 +49,7 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { parseImageReferences } from './image.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -78,31 +75,6 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
-
-  // Prune sessions whose conversation state no longer exists on disk.
-  // This prevents the agent from repeatedly failing to --resume a deleted session.
-  const prunedFolders: string[] = [];
-  for (const [folder, sessionId] of Object.entries(sessions)) {
-    const projectsDir = path.join(
-      DATA_DIR,
-      'sessions',
-      folder,
-      '.claude',
-      'projects',
-    );
-    if (!fs.existsSync(projectsDir)) {
-      deleteSession(folder);
-      delete sessions[folder];
-      prunedFolders.push(folder);
-    }
-  }
-  if (prunedFolders.length > 0) {
-    logger.info(
-      { pruned: prunedFolders },
-      'Pruned stale sessions (missing projects directory)',
-    );
-  }
-
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -193,14 +165,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        m.sender === 'system' ||
-        (TRIGGER_PATTERN.test(m.content.trim()) &&
-          (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg))),
+        TRIGGER_PATTERN.test(m.content.trim()) &&
+        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt = formatMessages(missedMessages);
+  const imageAttachments = parseImageReferences(missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -232,7 +204,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, prompt, chatJid, imageAttachments, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -241,22 +213,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info(
-        { group: group.name, length: raw.length, deliverable: !!text },
-        `Agent output: ${raw.slice(0, 200)}`,
-      );
+      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
-        logger.debug(
-          { group: group.name, length: text.length },
-          'Agent output delivered',
-        );
-      } else {
-        logger.info(
-          { group: group.name },
-          'Agent output empty after stripping <internal>, not delivered',
-        );
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -301,30 +261,11 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  imageAttachments: Array<{ relativePath: string; mediaType: string }>,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  let sessionId: string | undefined = sessions[group.folder];
-
-  // Prune stale session (projects dir deleted but DB/memory still reference it)
-  if (sessionId) {
-    const projectsDir = path.join(
-      DATA_DIR,
-      'sessions',
-      group.folder,
-      '.claude',
-      'projects',
-    );
-    if (!fs.existsSync(projectsDir)) {
-      deleteSession(group.folder);
-      delete sessions[group.folder];
-      sessionId = undefined;
-      logger.info(
-        { group: group.name, folder: group.folder },
-        'Pruned stale session at container start',
-      );
-    }
-  }
+  const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -372,6 +313,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        ...(imageAttachments.length > 0 && { imageAttachments }),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -454,10 +396,9 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                m.sender === 'system' ||
-                (TRIGGER_PATTERN.test(m.content.trim()) &&
-                  (m.is_from_me ||
-                    isTriggerAllowed(chatJid, m.sender, allowlistCfg))),
+                TRIGGER_PATTERN.test(m.content.trim()) &&
+                (m.is_from_me ||
+                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
@@ -471,7 +412,7 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const formatted = formatMessages(messagesToSend);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -496,11 +437,6 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
-
-    // Safety net: recover unprocessed messages (including system resume prompts
-    // from clear_session) that the drain path may have missed due to races.
-    recoverPendingMessages();
-
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }
 }
@@ -596,13 +532,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Initialize Telegram bot pool for agent swarm (if configured)
-  const { TELEGRAM_BOT_POOL } = await import('./config.js');
-  if (TELEGRAM_BOT_POOL.length > 0) {
-    const { initBotPool } = await import('./channels/telegram.js');
-    await initBotPool(TELEGRAM_BOT_POOL);
-  }
-
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -638,75 +567,6 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
-    clearSession: async (targetFolder, prompt) => {
-      // 1. Delete session from SQLite
-      deleteSession(targetFolder);
-      // 2. Remove in-memory session ID
-      delete sessions[targetFolder];
-      // 3. Archive JSONL session logs, then delete conversation state on disk
-      const projectsDir = path.join(
-        DATA_DIR,
-        'sessions',
-        targetFolder,
-        '.claude',
-        'projects',
-      );
-      const jsonlDir = path.join(projectsDir, '-workspace-group');
-      const archiveDir = path.join(
-        DATA_DIR,
-        'sessions',
-        targetFolder,
-        'log-archive',
-      );
-      if (fs.existsSync(jsonlDir)) {
-        const jsonlFiles = fs
-          .readdirSync(jsonlDir)
-          .filter((f) => f.endsWith('.jsonl'));
-        if (jsonlFiles.length > 0) {
-          fs.mkdirSync(archiveDir, { recursive: true });
-          for (const file of jsonlFiles) {
-            const src = path.join(jsonlDir, file);
-            const dest = path.join(archiveDir, file);
-            // Don't overwrite if already archived (e.g. from a previous clear)
-            if (!fs.existsSync(dest)) {
-              fs.copyFileSync(src, dest);
-            }
-          }
-        }
-      }
-      fs.rmSync(projectsDir, { recursive: true, force: true });
-      // 4. Close active container (forces restart on next message)
-      const targetJid = Object.entries(registeredGroups).find(
-        ([, g]) => g.folder === targetFolder,
-      )?.[0];
-      if (targetJid) {
-        queue.closeStdin(targetJid);
-        // 5. If prompt provided, store as a user message and trigger processing
-        if (prompt) {
-          const resumeTs = new Date().toISOString();
-          storeMessage({
-            id: `clear-${Date.now()}`,
-            chat_jid: targetJid,
-            sender: 'system',
-            sender_name: 'System',
-            content: prompt,
-            timestamp: resumeTs,
-            is_from_me: false,
-            is_bot_message: false,
-          });
-          // Rewind cursor to just before the resume prompt. The message loop
-          // may have piped the prompt to the dying container and advanced
-          // lastAgentTimestamp past it, so the drain run's processGroupMessages
-          // would find nothing. Rewinding guarantees it picks up the prompt.
-          lastAgentTimestamp[targetJid] = new Date(
-            new Date(resumeTs).getTime() - 1,
-          ).toISOString();
-          saveState();
-          queue.enqueueMessageCheck(targetJid);
-        }
-      }
-      logger.info({ targetFolder }, 'Session cleared');
-    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
